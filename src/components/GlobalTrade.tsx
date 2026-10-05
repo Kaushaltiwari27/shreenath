@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowRight, ShieldCheck, FileCheck, Layers } from 'lucide-react';
 import { Globe3D } from './Globe3D';
+import { ErrorBoundary } from './ErrorBoundary';
 
 interface RouteInfo {
   id: string;
@@ -100,10 +101,12 @@ export const GlobalTrade: React.FC = () => {
 
           {/* Interactive 3D Realistic Globe */}
           <div className="relative w-full rounded-xs overflow-hidden border border-[#202020] bg-radial from-[#151922] via-[#0d0f14] to-[#07080a] shadow-inner">
-            <Globe3D
-              activeRouteId={activeRoute}
-              onSelectRoute={(id) => setActiveRoute(activeRoute === id ? null : id)}
-            />
+            <ErrorBoundary>
+              <Globe3D
+                activeRouteId={activeRoute}
+                onSelectRoute={(id) => setActiveRoute(activeRoute === id ? null : id)}
+              />
+            </ErrorBoundary>
           </div>
 
           {/* Interactive Route Cards */}

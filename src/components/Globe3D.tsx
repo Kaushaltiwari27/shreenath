@@ -19,9 +19,28 @@ interface DestinationNode {
 export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const targetRotationRef = useRef<{ x: number; y: number } | null>(null);
+  const activeRouteIdRef = useRef<string | null>(activeRouteId);
   const cameraDistanceRef = useRef<number>(240);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
-  const [zoomLevel, setZoomLevel] = useState<number>(100);
+  const [zoomLevel, setZoomLevel] = useState<number>(53);
+  const [hasWebGLError, setHasWebGLError] = useState<boolean>(false);
+
+  // Keep activeRouteIdRef in sync with prop without re-mounting Three.js
+  useEffect(() => {
+    activeRouteIdRef.current = activeRouteId;
+    if (!activeRouteId) {
+      targetRotationRef.current = null;
+      return;
+    }
+    const dest = destinations.find((d) => d.id === activeRouteId);
+    if (dest) {
+      const midLon = (origin.lon + dest.lon) / 2;
+      const midLat = (origin.lat + dest.lat) / 2;
+      const targetY = -((midLon + 180) * (Math.PI / 180)) + Math.PI / 2;
+      const targetX = (midLat * Math.PI) / 180 * 0.45;
+      targetRotationRef.current = { x: targetX, y: targetY };
+    }
+  }, [activeRouteId]);
 
   // Geographic coordinates: Origin = Surat, India (21.17° N, 72.83° E)
   const origin = { lat: 21.17, lon: 72.83, name: 'INDIA (SURAT HQ)', port: 'Mundra & JNPT Corridors' };
@@ -44,22 +63,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     return new THREE.Vector3(x, y, z);
   };
 
-  // Rotate globe smoothly when activeRouteId changes
-  useEffect(() => {
-    if (!activeRouteId) {
-      targetRotationRef.current = null;
-      return;
-    }
-    const dest = destinations.find((d) => d.id === activeRouteId);
-    if (dest) {
-      const midLon = (origin.lon + dest.lon) / 2;
-      const midLat = (origin.lat + dest.lat) / 2;
-      const targetY = -((midLon + 180) * (Math.PI / 180)) + Math.PI / 2;
-      const targetX = (midLat * Math.PI) / 180 * 0.45;
-      targetRotationRef.current = { x: targetX, y: targetY };
-    }
-  }, [activeRouteId]);
-
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -67,14 +70,27 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     const width = container.clientWidth || 800;
     const height = container.clientHeight || 520;
 
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+        powerPreference: 'default',
+        failIfMajorPerformanceCaveat: false,
+      });
+    } catch (e) {
+      console.warn('WebGL initialization failed, using fallback:', e);
+      setHasWebGLError(true);
+      return;
+    }
+
     // 1. Scene, Camera, Renderer
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, width / height, 1, 2000);
+    const camera = new THREE.PerspectiveCamera(45, Math.max(0.1, width / Math.max(1, height)), 1, 2000);
     camera.position.z = cameraDistanceRef.current;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
     container.appendChild(renderer.domElement);
@@ -93,7 +109,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       starPos[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
       starPos[i * 3 + 2] = radius * Math.cos(phi);
 
-      // Subtle warm gold and diamond-white stars
       const isGold = Math.random() > 0.65;
       starColors[i * 3] = isGold ? 1.0 : 0.85;
       starColors[i * 3 + 1] = isGold ? 0.84 : 0.9;
@@ -116,27 +131,23 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     const ambientLight = new THREE.AmbientLight(0x1a202c, 2.2);
     scene.add(ambientLight);
 
-    // Warm Sun Directional Light
     const sunLight = new THREE.DirectionalLight(0xfffaed, 3.2);
     sunLight.position.set(200, 100, 180);
     scene.add(sunLight);
 
-    // Corporate Gold Rim Light (creates luminous edge glow)
     const goldRimLight = new THREE.DirectionalLight(0xd4af37, 2.8);
     goldRimLight.position.set(-200, -80, -120);
     scene.add(goldRimLight);
 
-    // Subtle Cyan Fill Light from bottom
     const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.8);
     fillLight.position.set(0, -150, 80);
     scene.add(fillLight);
 
-    // 4. Globe Textures Loading
+    // 4. Globe Textures Loading with graceful fallback
     const globeRadius = 75;
     const globeGroup = new THREE.Group();
     scene.add(globeGroup);
 
-    // Initial position: Orient directly towards India
     globeGroup.rotation.y = -((origin.lon + 180) * (Math.PI / 180)) + Math.PI / 2;
     globeGroup.rotation.x = (origin.lat * Math.PI) / 180 * 0.4;
 
@@ -161,8 +172,7 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     const globeMesh = new THREE.Mesh(globeGeo, globeMat);
     globeGroup.add(globeMesh);
 
-    // 6. Custom Atmosphere Glow Shaders (Inner Soft Glow + Outer Ethereal Halo)
-    // Outer Atmosphere Halo (BackSide)
+    // 6. Safe Atmosphere Glow Shaders (clamp prevents NaN on GPUs)
     const outerHaloGeo = new THREE.SphereGeometry(globeRadius * 1.15, 64, 64);
     const outerHaloMat = new THREE.ShaderMaterial({
       vertexShader: `
@@ -175,8 +185,9 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       fragmentShader: `
         varying vec3 vNormal;
         void main() {
-          float intensity = pow(0.68 - dot(vNormal, vec3(0, 0, 1.0)), 3.2);
-          gl_FragColor = vec4(0.83, 0.69, 0.22, 1.0) * intensity * 0.9;
+          float d = dot(vNormal, vec3(0.0, 0.0, 1.0));
+          float intensity = pow(clamp(0.65 - d, 0.0, 1.0), 2.5);
+          gl_FragColor = vec4(0.83, 0.69, 0.22, 1.0) * intensity * 0.8;
         }
       `,
       side: THREE.BackSide,
@@ -187,7 +198,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     const outerHalo = new THREE.Mesh(outerHaloGeo, outerHaloMat);
     scene.add(outerHalo);
 
-    // Inner Atmosphere Fresnel Shell (FrontSide)
     const innerAtmoGeo = new THREE.SphereGeometry(globeRadius * 1.018, 64, 64);
     const innerAtmoMat = new THREE.ShaderMaterial({
       vertexShader: `
@@ -200,8 +210,9 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       fragmentShader: `
         varying vec3 vNormal;
         void main() {
-          float intensity = pow(0.72 - dot(vNormal, vec3(0, 0, 1.0)), 2.4);
-          gl_FragColor = vec4(0.95, 0.82, 0.35, 1.0) * intensity * 0.45;
+          float d = dot(vNormal, vec3(0.0, 0.0, 1.0));
+          float intensity = pow(clamp(0.70 - d, 0.0, 1.0), 2.0);
+          gl_FragColor = vec4(0.95, 0.82, 0.35, 1.0) * intensity * 0.4;
         }
       `,
       blending: THREE.AdditiveBlending,
@@ -211,17 +222,15 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     const innerAtmo = new THREE.Mesh(innerAtmoGeo, innerAtmoMat);
     globeGroup.add(innerAtmo);
 
-    // 7. Surat / Western India Origin HQ Marker
+    // 7. Surat HQ Marker & Pulsing Radar Rings
     const originPos = latLongToVector3(origin.lat, origin.lon, globeRadius);
 
-    // Gold Beacon Diamond/Star Pin
     const originPinGeo = new THREE.OctahedronGeometry(2.4, 0);
     const originPinMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
     const originPin = new THREE.Mesh(originPinGeo, originPinMat);
     originPin.position.copy(originPos.clone().multiplyScalar(1.02));
     globeGroup.add(originPin);
 
-    // Origin Vertical Beacon Light Beam
     const beamGeo = new THREE.CylinderGeometry(0.4, 1.2, 14, 16);
     const beamMat = new THREE.MeshBasicMaterial({
       color: 0xffe680,
@@ -234,7 +243,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     originBeam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), originPos.clone().normalize());
     globeGroup.add(originBeam);
 
-    // Triple Concentric Pulsing Radar Rings
     const radarRings: { mesh: THREE.Mesh; phase: number }[] = [];
     for (let i = 0; i < 3; i++) {
       const ringGeo = new THREE.RingGeometry(2.2, 3.4, 32);
@@ -264,7 +272,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     destinations.forEach((dest) => {
       const destPos = latLongToVector3(dest.lat, dest.lon, globeRadius);
 
-      // Interactive destination node sphere
       const pinGeo = new THREE.SphereGeometry(2.4, 16, 16);
       const pinMat = new THREE.MeshStandardMaterial({
         color: 0xc9a227,
@@ -278,7 +285,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       globeGroup.add(pinMesh);
       interactivePins.push(pinMesh);
 
-      // Destination Ground Halo Ring
       const destRingGeo = new THREE.RingGeometry(2.6, 3.6, 32);
       const destRingMat = new THREE.MeshBasicMaterial({
         color: 0xd4af37,
@@ -291,7 +297,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       destRing.lookAt(new THREE.Vector3(0, 0, 0));
       globeGroup.add(destRing);
 
-      // Calculate 3D Parabolic Ballistic Trajectory
       const dist = originPos.distanceTo(destPos);
       const midPoint = originPos.clone().lerp(destPos, 0.5);
       const altitude = globeRadius + Math.pow(dist, 1.08) * 0.32;
@@ -314,7 +319,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       const line = new THREE.Line(curveGeo, curveMat);
       globeGroup.add(line);
 
-      // Multi-Particle Glowing Comet Tail (Head photon + 4 trailing sparks)
       const cometParticles: THREE.Mesh[] = [];
       const tailLengths = [1.8, 1.5, 1.2, 0.9, 0.6];
       const opacities = [1.0, 0.75, 0.5, 0.3, 0.15];
@@ -357,20 +361,21 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     };
 
     const onMouseMove = (e: MouseEvent) => {
-      // Hover detection on pins
       const rect = renderer.domElement.getBoundingClientRect();
-      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      if (rect.width > 0 && rect.height > 0) {
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-      raycaster.setFromCamera(mouse, camera);
-      const intersects = raycaster.intersectObjects(interactivePins);
-      if (intersects.length > 0) {
-        container.style.cursor = 'pointer';
-        const hit = intersects[0].object;
-        setHoveredNode(hit.userData?.name || null);
-      } else {
-        container.style.cursor = isDragging ? 'grabbing' : 'grab';
-        setHoveredNode(null);
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(interactivePins);
+        if (intersects.length > 0) {
+          container.style.cursor = 'pointer';
+          const hit = intersects[0].object;
+          setHoveredNode(hit.userData?.name || null);
+        } else {
+          container.style.cursor = isDragging ? 'grabbing' : 'grab';
+          setHoveredNode(null);
+        }
       }
 
       if (!isDragging) return;
@@ -396,21 +401,22 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       const diffY = Math.abs(e.clientY - startMouseY);
       if (diffX < 6 && diffY < 6) {
         const rect = renderer.domElement.getBoundingClientRect();
-        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        if (rect.width > 0 && rect.height > 0) {
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-        raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObjects(interactivePins);
-        if (intersects.length > 0) {
-          const hit = intersects[0].object;
-          if (hit.userData?.routeId) {
-            onSelectRoute(hit.userData.routeId);
+          raycaster.setFromCamera(mouse, camera);
+          const intersects = raycaster.intersectObjects(interactivePins);
+          if (intersects.length > 0) {
+            const hit = intersects[0].object;
+            if (hit.userData?.routeId) {
+              onSelectRoute(hit.userData.routeId);
+            }
           }
         }
       }
     };
 
-    // Smooth Mouse Wheel Zoom (Clamped between 170 and 320)
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const zoomDelta = e.deltaY * 0.12;
@@ -421,7 +427,6 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       setZoomLevel(pct);
     };
 
-    // Touch events for mobile
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length === 1) {
         isDragging = true;
@@ -457,15 +462,17 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
         const diffY = Math.abs(e.changedTouches[0].clientY - startMouseY);
         if (diffX < 10 && diffY < 10) {
           const rect = renderer.domElement.getBoundingClientRect();
-          mouse.x = ((e.changedTouches[0].clientX - rect.left) / rect.width) * 2 - 1;
-          mouse.y = -((e.changedTouches[0].clientY - rect.top) / rect.height) * 2 + 1;
+          if (rect.width > 0 && rect.height > 0) {
+            mouse.x = ((e.changedTouches[0].clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.changedTouches[0].clientY - rect.top) / rect.height) * 2 + 1;
 
-          raycaster.setFromCamera(mouse, camera);
-          const intersects = raycaster.intersectObjects(interactivePins);
-          if (intersects.length > 0) {
-            const hit = intersects[0].object;
-            if (hit.userData?.routeId) {
-              onSelectRoute(hit.userData.routeId);
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(interactivePins);
+            if (intersects.length > 0) {
+              const hit = intersects[0].object;
+              if (hit.userData?.routeId) {
+                onSelectRoute(hit.userData.routeId);
+              }
             }
           }
         }
@@ -489,30 +496,23 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       animationFrameId = requestAnimationFrame(animate);
       const elapsedTime = clock.getElapsedTime();
 
-      // Smooth programmatic target rotation when route is clicked
       if (targetRotationRef.current) {
         const lerpFactor = 0.045;
         globeGroup.rotation.y += (targetRotationRef.current.y - globeGroup.rotation.y) * lerpFactor;
         globeGroup.rotation.x += (targetRotationRef.current.x - globeGroup.rotation.x) * lerpFactor;
       } else if (!isDragging) {
-        // Natural inertia damping & gentle auto-orbit rotation
         rotSpeedX *= 0.94;
         rotSpeedY *= 0.94;
         globeGroup.rotation.y += rotSpeedY + 0.0016;
         globeGroup.rotation.x += rotSpeedX;
       }
 
-      // Latitude clamp
       globeGroup.rotation.x = Math.max(-1.1, Math.min(1.1, globeGroup.rotation.x));
-
-      // Starfield subtle counter-drift
       starField.rotation.y = -elapsedTime * 0.0006;
 
-      // Rotate Origin Pin (Diamond spin)
       originPin.rotation.y = elapsedTime * 1.5;
       originPin.rotation.x = elapsedTime * 0.8;
 
-      // Animate Triple Concentric Radar Rings
       radarRings.forEach((r, idx) => {
         const t = (elapsedTime * 1.8 + idx * 0.6) % 1.8;
         const scale = 1.0 + t * 1.6;
@@ -521,41 +521,44 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
         (r.mesh.material as THREE.MeshBasicMaterial).opacity = opacity * 0.8;
       });
 
-      // Animate Animated Comet Trails along Trade Arcs
+      const currentActive = activeRouteIdRef.current;
       curveObjects.forEach((item, idx) => {
-        const isSelected = activeRouteId === item.destId;
+        const isSelected = currentActive === item.destId;
         const speed = isSelected ? 0.38 : 0.24 + idx * 0.03;
         const baseT = (elapsedTime * speed) % 1;
 
-        // Active route styling
         const lineMat = item.line.material as THREE.LineBasicMaterial;
         lineMat.opacity = isSelected ? 0.95 : 0.45;
         lineMat.color.setHex(isSelected ? 0xffdf7a : 0xc9a227);
 
-        // Update trailing comet particles
         item.cometParticles.forEach((particle, pIdx) => {
           const trailOffset = pIdx * 0.022;
           let pT = baseT - trailOffset;
           if (pT < 0) pT += 1;
-          const pos = item.curve.getPointAt(pT);
+          const clampedT = Math.max(0, Math.min(1, pT));
+          const pos = item.curve.getPointAt(clampedT);
           particle.position.copy(pos);
 
-          // Active route comet glows larger
           const scale = isSelected ? 1.4 : 1.0;
           particle.scale.set(scale, scale, scale);
         });
       });
 
-      renderer.render(scene, camera);
+      try {
+        renderer.render(scene, camera);
+      } catch (renderError) {
+        console.warn('Render loop encountered error:', renderError);
+      }
     };
 
     animate();
 
-    // 11. Responsive Resize Handler
+    // 11. Responsive Resize Handler (Guarded against 0 or NaN)
     const handleResize = () => {
       if (!containerRef.current) return;
-      const newW = containerRef.current.clientWidth;
-      const newH = containerRef.current.clientHeight;
+      const newW = containerRef.current.clientWidth || 800;
+      const newH = containerRef.current.clientHeight || 520;
+      if (newW <= 0 || newH <= 0) return;
       camera.aspect = newW / newH;
       camera.updateProjectionMatrix();
       renderer.setSize(newW, newH);
@@ -587,9 +590,8 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
       starGeo.dispose();
       starMat.dispose();
     };
-  }, [activeRouteId]);
+  }, []); // Mounts once, never re-creates Three.js canvas unnecessarily
 
-  // UI Control Handlers
   const handleZoom = (delta: number) => {
     cameraDistanceRef.current = THREE.MathUtils.clamp(cameraDistanceRef.current + delta, 170, 320);
     const pct = Math.round(((320 - cameraDistanceRef.current) / (320 - 170)) * 100);
@@ -604,6 +606,22 @@ export const Globe3D: React.FC<Globe3DProps> = ({ activeRouteId, onSelectRoute }
     cameraDistanceRef.current = 240;
     setZoomLevel(53);
   };
+
+  if (hasWebGLError) {
+    return (
+      <div className="relative w-full h-[400px] flex items-center justify-center p-8 bg-[#111318] text-center border border-[#222]">
+        <div>
+          <span className="w-3 h-3 rounded-full bg-[#C9A227] inline-block mb-3 animate-ping" />
+          <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-2 font-display">
+            Strategic Western India Trade Corridors
+          </h4>
+          <p className="text-xs text-[#888888] max-w-md mx-auto">
+            Direct maritime and multi-modal connectivity from Mundra & JNPT to Middle East, Europe, Asia and Africa.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full h-[440px] sm:h-[540px] lg:h-[600px] flex items-center justify-center select-none overflow-hidden bg-radial from-[#121622] via-[#090b10] to-[#040507]">
